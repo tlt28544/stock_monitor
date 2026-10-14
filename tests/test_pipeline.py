@@ -1,196 +1,154 @@
 import json
+import os
+import subprocess
 from datetime import date
 from pathlib import Path
+
+import httpx
 import pytest
 from pypdf import PdfReader
-from equity.models import DataQualityError, Settings
+
+from equity.adaptive_providers import AdaptiveTavilyNews
+from equity.models import Settings, DataQualityError
 from equity.pipeline import Pipeline, run_lock
-from equity.demo import DemoNews
-from equity.providers import DemoResearch
-from equity.reports import render
+from equity.narrative_reports import render_narrative
+from equity.narrative_research import NarrativeResearch
 
 
-def test_three_stock_demo(pipeline):
-    result=pipeline.run(['TSLA','AMZN','META'])
-    assert result['outcome']=='partial' and len(result['completed'])==3
-    assert result['api_usage']=={'tokens':0,'cost_usd':0}
-    for ticker in result['completed']:
-        path=pipeline.output/'2026-10-10'/f'{ticker}.pdf'
-        reader=PdfReader(path)
-        assert len(reader.pages)==2
-        assert 'Valuation Table' in reader.pages[1].extract_text()
-        assert 'SYNTHETIC' in reader.pages[0].extract_text()
-    assert json.loads((pipeline.output/'2026-10-10'/'status.json').read_text())['total']==3
+@pytest.fixture
+def pipeline(tmp_path):
+    return Pipeline(Settings(retries=0), tmp_path / 'db', tmp_path / 'reports', date(2026, 10, 10), demo=True)
 
 
-def test_duplicate_schedule_no_work(pipeline):
-    pipeline.run(['TSLA'])
-    before=(pipeline.output/'2026-10-10'/'TSLA.pdf').stat().st_mtime_ns
-    pipeline.news_factory=lambda t:pytest.fail('Duplicate collection')
-    pipeline.research_factory=lambda t:pytest.fail('Duplicate synthesis')
-    pipeline.run(['TSLA'])
-    assert (pipeline.output/'2026-10-10'/'TSLA.pdf').stat().st_mtime_ns==before
+def test_demo_all_companies_and_pdf_has_no_valuation(pipeline):
+    tickers = Settings.model_validate_json(Path('config/settings.json').read_text()).watchlist
+    result = pipeline.run(tickers)
+    assert result['outcome'] == 'complete' and len(result['completed']) == 40
+    for ticker in tickers:
+        reader = PdfReader(pipeline.output / '2026-10-10' / f'{ticker}.pdf')
+        text = '\n'.join(p.extract_text() for p in reader.pages)
+        assert ticker in text and 'SYNTHETIC DEMO' in text and 'Sources' in text
+        assert 'Valuation' not in text
+        meta = json.loads((pipeline.output / '2026-10-10' / f'{ticker}.json').read_text())
+        assert len(meta['searches']) == 5
 
 
-def test_concurrent_schedule_excluded(pipeline):
-    with run_lock(pipeline.store.path):
-        with pytest.raises(RuntimeError,match='Another orchestrator'): pipeline.run(['TSLA'])
+def test_completed_narrative_skipped_and_corrupt_pdf_repaired(pipeline):
+    assert pipeline.run(['TSLA'])['outcome'] == 'complete'
+    path = pipeline.output / '2026-10-10/TSLA.pdf'
+    before = path.stat().st_mtime_ns
+    pipeline.news_factory = lambda t: pytest.fail('Repeated news')
+    pipeline.research_factory = lambda t: pytest.fail('Repeated LLM')
+    pipeline.renderer = lambda *a: pytest.fail('Repeated render')
+    assert pipeline.run(['TSLA'])['outcome'] == 'complete'
+    assert path.stat().st_mtime_ns == before
+    path.write_bytes(b'broken')
+    assert pipeline.status()['jobs'][0]['status'] == 'failed'
+    pipeline.renderer = render_narrative
+    assert pipeline.run(['TSLA'])['outcome'] == 'complete'
 
 
-def test_partial_success_across_stocks(pipeline):
+def test_pdf_failure_reuses_news_and_llm(pipeline):
+    def fail(*args):
+        raise OSError('PDF error')
+    pipeline.renderer = fail
+    result = pipeline.run(['TSLA'])
+    assert result['outcome'] == 'failed' and result['failed'][0]['stage'] == 'pdf'
+    pipeline.news_factory = lambda t: pytest.fail('Repeated news')
+    pipeline.research_factory = lambda t: pytest.fail('Repeated LLM')
+    pipeline.renderer = render_narrative
+    assert pipeline.run(['TSLA'])['outcome'] == 'complete'
+
+
+def test_one_company_failure_does_not_abort_other_reports(pipeline):
+    from equity.demo import DemoNews
     class BrokenNews:
-        def fetch(self,*args): raise DataQualityError('Missing data')
-    pipeline.news_factory=lambda t:BrokenNews() if t=='META' else DemoNews(pipeline.date)
-    result=pipeline.run(['TSLA','META','AMZN'])
-    assert len(result['completed'])==2
-    assert result['failed']==[{'ticker':'META','reason':'Missing data','type':'data_quality'}]
+        def fetch(self, *args):
+            raise DataQualityError('Malformed Tavily results')
+    pipeline.news_factory = lambda t: BrokenNews() if t == 'META' else DemoNews(pipeline.settings)
+    result = pipeline.run(['TSLA', 'META'])
+    assert result['outcome'] == 'partial' and result['completed'] == ['TSLA']
+    assert result['failed'][0]['reason'] == 'Malformed Tavily results'
 
 
-def test_restart_after_synthesis_interrupt(pipeline):
-    class Interrupted:
-        def synthesize(self,*args): raise KeyboardInterrupt()
-    pipeline.research_factory=lambda t:Interrupted()
-    with pytest.raises(KeyboardInterrupt): pipeline.run(['TSLA'])
-    assert pipeline.store.cached('TSLA','2026-10-10','v1','classification')
-    recovered=Pipeline(pipeline.settings,pipeline.store.path,pipeline.output,pipeline.date,demo=True,
-                       news_factory=lambda t:pytest.fail('Collection should be checkpointed'),research_factory=lambda t:DemoResearch())
-    assert recovered.run(['TSLA'])['completed']==['TSLA']
-
-
-def test_pdf_failure_does_not_complete_and_retry_reuses_synthesis(pipeline):
-    def broken(*args): raise OSError('simulated pdf failure')
-    pipeline.renderer=broken
-    result=pipeline.run(['TSLA'])
-    assert result['outcome']=='failed'
-    assert result['jobs'][0]['stage']=='report'
-    assert not (pipeline.output/'2026-10-10'/'TSLA.pdf').exists()
-    pipeline.renderer=render
-    pipeline.research_factory=lambda t:pytest.fail('Already synthesized')
-    assert pipeline.run(['TSLA'])['completed']==['TSLA']
-
-
-def test_missing_completed_file_regenerated(pipeline):
-    pipeline.run(['TSLA'])
-    (pipeline.output/'2026-10-10'/'TSLA.pdf').write_bytes(b'bad')
-    assert pipeline.status()['jobs'][0]['status']=='failed'
-    assert pipeline.run(['TSLA'])['completed']==['TSLA']
-
-
-def test_graceful_stop_records_interrupted(pipeline):
-    pipeline.stop.set()
-    result=pipeline.run(['TSLA','META'])
-    assert all(j['status']=='interrupted' for j in result['jobs'])
-    pipeline.stop.clear()
-    assert len(pipeline.run(['TSLA','META'])['completed'])==2
-
-
-def test_changed_config_requires_new_version(pipeline):
-    pipeline.run(['TSLA'])
-    pipeline.settings.max_events=4
-    with pytest.raises(ValueError,match='configuration differs'): pipeline.run(['TSLA'])
-
-
-def test_valuation_checkpoint_immutable(pipeline,reference):
-    reference['ticker']='TSLA'
-    pipeline.store.import_reference('TSLA','Analyst',True,reference)
-    pipeline.run(['TSLA'])
-    original=pipeline.store.cached('TSLA','2026-10-10','v1','valuation')
-    reference['segments'][0]['multiple']='99'
-    pipeline.store.import_reference('TSLA','Analyst',True,reference)
-    # Re-render must preserve the valuation revision used by this report version.
-    (pipeline.output/'2026-10-10'/'TSLA.pdf').unlink()
-    pipeline.run(['TSLA'])
-    assert pipeline.store.cached('TSLA','2026-10-10','v1','valuation')==original
-    assert pipeline.store.reference('TSLA')['segments'][0]['multiple']=='99'
-
-
-def test_36_stocks_same_architecture(pipeline):
-    tickers=[f'T{i:02d}' for i in range(36)]
-    result=pipeline.run(tickers)
-    assert result['total']==36 and len(result['completed'])==36
-
-
-def test_cli_status_resume(tmp_path):
-    from orchestrator import main
-    args=['--date','2026-10-10','--demo','--db',str(tmp_path/'db'),'--output',str(tmp_path/'reports')]
-    assert main(['--tickers','TSLA']+args)==2
-    assert main(['--status']+args)==0
-    assert main(['--resume']+args)==2
-
-
-def test_live_adapters_end_to_end_mocked(tmp_path,settings,monkeypatch):
-    import httpx
-    from equity.providers import EODHDNews, OpenAIResearch
-    monkeypatch.setenv('EODHD_API_KEY','fake'); monkeypatch.setenv('LLM_API_KEY','fake')
+def test_empty_month_no_llm_but_honest_pdf(pipeline):
+    calls = []
     def handler(request):
-        if request.url.host=='eodhd.com':
-            return httpx.Response(200,json=[{'date':'2026-10-01T00:00:00Z','title':title,'content':'Source-provided mock excerpt',
-                                           'link':f'https://example.com/{i}'} for i,title in enumerate(['Earnings guidance','Regulatory action','Product launch'])])
-        body=json.loads(request.content)
-        data=json.loads(body['messages'][1]['content'])
-        research=DemoResearch().synthesize(data['ticker'],data['events'],None)
-        return httpx.Response(200,json={'usage':{'prompt_tokens':100,'completion_tokens':100},
-                                      'choices':[{'finish_reason':'stop','message':{'content':research.model_dump_json()}}]})
-    c=httpx.Client(transport=httpx.MockTransport(handler))
-    p=Pipeline(settings,tmp_path/'db',tmp_path/'out',date(2026,10,10),news_factory=lambda t:EODHDNews(settings,client=c))
-    p.research_factory=lambda t:OpenAIResearch(settings,p.store,t,'2026-10-10','v1',c)
-    result=p.run(['TSLA','AMZN','META'])
-    assert len(result['completed'])==3
-    assert result['api_usage']['tokens']==600
-    assert result['api_usage']['cost_usd']>0
-    assert result['demo'] is False
+        calls.append(request)
+        return httpx.Response(200, json={'results': []})
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        pipeline.news_factory = lambda t: AdaptiveTavilyNews(pipeline.settings, client)
+        pipeline.research_factory = lambda t: pytest.fail('No news must not call LLM')
+        with pytest.MonkeyPatch.context() as m:
+            m.setenv('TAVILY_API_KEY', 'fake')
+            assert pipeline.run(['TSLA'])['outcome'] == 'complete'
+    assert len(calls) == 5
+    text = PdfReader(pipeline.output / '2026-10-10/TSLA.pdf').pages[0].extract_text()
+    assert 'No usable dated news' in text
 
 
-def test_incremental_and_periodic_backfill(tmp_path,settings):
-    windows=[]
-    class News:
-        def fetch(self,ticker,start,end):
-            windows.append((start,end))
-            # No new articles in next report week; stored articles remain relevant.
-            return (DemoNews(date(2026,10,10)).fetch(ticker,start,end)[0],[]) if len(windows) in (1,3) else ([],[])
-    p=Pipeline(settings,tmp_path/'db',tmp_path/'out',date(2026,10,10),demo=True,news_factory=lambda t:News())
-    assert p.run(['TSLA'])['completed']==['TSLA']
-    p2=Pipeline(settings,tmp_path/'db',tmp_path/'out',date(2026,10,17),demo=True,news_factory=lambda t:News())
-    assert p2.run(['TSLA'])['completed']==['TSLA']
-    assert windows[0][0].date()==date(2026,7,13)
-    assert windows[1][0].date()==date(2026,10,7)
-    # Backfill needs new within-window fixtures; keep original events within 90 days here.
-    p3=Pipeline(settings,tmp_path/'db',tmp_path/'out',date(2026,11,7),demo=True,news_factory=lambda t:News())
-    assert p3.run(['TSLA'])['completed']==['TSLA']
-    assert windows[2][0].date()==date(2026,8,10)
+def test_lock_stop_and_resume(pipeline):
+    with run_lock(pipeline.store.path):
+        with pytest.raises(RuntimeError, match='Another orchestrator'):
+            pipeline.run(['TSLA'])
+    pipeline.stop.set()
+    assert pipeline.run(['TSLA'])['jobs'][0]['status'] == 'interrupted'
+    pipeline.stop.clear()
+    assert pipeline.run(['TSLA'])['outcome'] == 'complete'
 
 
-def test_full_report_with_approved_reference_and_complete_provider(pipeline,reference):
-    reference['ticker']='TSLA'
-    pipeline.store.import_reference('TSLA','Analyst',True,reference)
-    class CompleteNews:
-        def fetch(self,*args): return DemoNews(pipeline.date).fetch(*args)[0],[]
-    pipeline.news_factory=lambda t:CompleteNews()
-    result=pipeline.run(['TSLA'])
-    assert result['outcome']=='complete'
-    assert result['jobs'][0]['warnings']==[]
-    last=PdfReader(pipeline.output/'2026-10-10'/'TSLA.pdf').pages[1].extract_text()
-    assert '3,300.00' in last and '33.00' in last and '10.00%' in last
-
-
-def test_atomic_pdf_failure_preserves_previous_output(pipeline,monkeypatch):
-    import equity.reports as reports
+def test_changed_model_requires_new_version_but_concurrency_does_not(pipeline):
     pipeline.run(['TSLA'])
-    old=(pipeline.output/'2026-10-10'/'TSLA.pdf').read_bytes()
-    def fail(*args,**kwargs): raise OSError('Build failed')
-    monkeypatch.setattr(reports.SimpleDocTemplate,'build',fail)
-    pipeline.renderer=render
-    # Re-render explicitly to exercise atomic writing, not the idempotent skip.
-    events=pipeline.store.cached('TSLA','2026-10-10','v1','classification')['events']
-    from equity.models import Research
-    research=Research.model_validate(pipeline.store.cached('TSLA','2026-10-10','v1','synthesis'))
-    valuation=pipeline.store.cached('TSLA','2026-10-10','v1','valuation')
-    with pytest.raises(OSError): render(pipeline.output/'2026-10-10','TSLA','2026-10-10','v1',events,research,valuation,[],True)
-    assert (pipeline.output/'2026-10-10'/'TSLA.pdf').read_bytes()==old
-    assert not list((pipeline.output/'2026-10-10').glob('.TSLA.*'))
+    pipeline.settings.concurrency = 1
+    assert pipeline.run(['TSLA'])['outcome'] == 'complete'
+    pipeline.settings.llm_model = 'different-model'
+    with pytest.raises(ValueError, match='Configuration changed'):
+        pipeline.run(['TSLA'])
 
 
-def test_incomplete_backfill_retried_not_treated_as_complete(pipeline):
-    result=pipeline.run(['TSLA'])
-    assert result['completed']==['TSLA']
-    assert pipeline.store.ingestion('TSLA')['full_date'] is None
+def test_live_adapters_mocked_end_to_end(tmp_path, monkeypatch):
+    monkeypatch.setenv('TAVILY_API_KEY', 'fake'); monkeypatch.setenv('LLM_API_KEY', 'fake')
+    calls = {'news': 0, 'llm': 0}
+    def handler(request):
+        if request.url.host == 'api.tavily.com':
+            calls['news'] += 1
+            return httpx.Response(200, json={'results': [{'published_date': '2026-10-01T00:00:00Z',
+                'url': 'https://example.com/product', 'title': 'Product launch', 'content': 'The company launched a product.'}]})
+        calls['llm'] += 1
+        articles = json.loads(json.loads(request.content)['messages'][1]['content'])['articles']
+        raw = {'narrative_blocks': [{'title': 'Product strategy', 'content': 'The company launched a product.',
+                                    'event_ids': [articles[0]['id']]}]}
+        return httpx.Response(200, json={'choices': [{'finish_reason': 'stop', 'message': {'content': json.dumps(raw)}}]})
+    settings = Settings(retries=0)
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        p = Pipeline(settings, tmp_path / 'db', tmp_path / 'reports', date(2026, 10, 10),
+                     news_factory=lambda t: AdaptiveTavilyNews(settings, client),
+                     research_factory=lambda t: NarrativeResearch(settings, client))
+        assert p.run(['TSLA', 'META'])['outcome'] == 'complete'
+        assert p.run(['TSLA', 'META'])['outcome'] == 'complete'
+    assert calls == {'news': 10, 'llm': 2}
+    md = (p.output / '2026-10-10/TSLA.md').read_text()
+    assert 'The company launched a product. [1]' in md
+
+
+def test_cli_demo_status_resume(tmp_path, capsys):
+    from orchestrator import main
+    args = ['--date', '2026-10-10', '--demo', '--db', str(tmp_path / 'db'), '--output', str(tmp_path / 'reports')]
+    assert main(['--tickers', 'TSLA'] + args) == 0
+    assert main(['--status'] + args) == 0
+    assert main(['--resume'] + args) == 0
+
+
+@pytest.mark.parametrize('runner', ['run_weekly.sh', 'scripts/run_weekly.sh'])
+@pytest.mark.parametrize('code', [0, 1, 2])
+def test_shell_runner_preserves_exit_code_from_any_directory(tmp_path, runner, code):
+    root = Path(__file__).resolve().parents[1]
+    fake = tmp_path / 'fake-python'
+    fake.write_text(f'#!/usr/bin/env bash\nprintf "%s\\n" "$@"\nexit {code}\n')
+    fake.chmod(0o755)
+    env = dict(os.environ, STOCK_MONITOR_PYTHON=str(fake), STOCK_MONITOR_ENV_FILE=str(tmp_path / 'absent'))
+    result = subprocess.run(['bash', str(root / runner), '2026-10-10'], cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert result.returncode == code
+    assert str(root / 'orchestrator.py') in result.stdout
+    assert '--all\n--date\n2026-10-10' in result.stdout
+    assert 'successfully' not in result.stdout

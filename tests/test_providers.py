@@ -1,145 +1,168 @@
 import json
-from datetime import datetime, timezone
+import threading
+from datetime import date, datetime, timezone
+
 import httpx
 import pytest
-from equity.models import DataQualityError, PermanentAPIError, TemporaryAPIError, BudgetError
-from equity.providers import EODHDNews, OpenAIResearch, DemoResearch, retry, request_json, FileNews
-from equity.demo import DemoNews
-from equity.events import deduplicate, rank, validate_research
-from equity.store import Store
-from datetime import date
 
-START=datetime(2026,7,13,tzinfo=timezone.utc)
-END=datetime(2026,10,11,tzinfo=timezone.utc)
+from equity.adaptive_providers import AdaptiveTavilyNews, company_name, timestamp
+from equity.models import Settings, DataQualityError, PermanentAPIError, report_window
+from equity.narrative_research import NarrativeResearch, validate_research
 
 
-def client(handler):
-    return httpx.Client(transport=httpx.MockTransport(handler))
+def news_row(title='AI chip launch', date='2026-10-01T00:00:00Z', url='https://example.com/news'):
+    return {'title': title, 'published_date': date, 'url': url,
+            'content': 'AI chip AI chip revenue growth; revenue increased 12% to $1,200 million.'}
 
 
-@pytest.mark.parametrize('status',[429,408,500,503])
-def test_transient_retry(settings,status):
-    calls=[]
+@pytest.fixture
+def settings(monkeypatch):
+    monkeypatch.setenv('TAVILY_API_KEY', 'fake')
+    monkeypatch.setenv('LLM_API_KEY', 'fake')
+    return Settings(retries=0, retry_base_seconds=0)
+
+
+def test_original_five_search_strategy_and_theme_order(settings):
+    requests = []
+    def handler(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={'results': [news_row()]})
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        provider = AdaptiveTavilyNews(settings, client)
+        start, end = report_window(date(2026, 10, 10))
+        result = provider.fetch('TSLA', start, end)
+    assert len(requests) == 5 and len(result['searches']) == 5
+    assert 'announced launched new product management appointed CEO hired acquired buyback insider buy' in requests[0]['query']
+    assert 'AI breakthrough technology innovation partnership deal customer contract competitive advantage' in requests[1]['query']
+    assert 'trending hot topic buzz viral news' in requests[2]['query']
+    assert 'ai chip details analysis impact' in requests[3]['query']
+    assert 'revenue growth details analysis impact' in requests[4]['query']
+    assert [r['max_results'] for r in requests] == [15, 15, 15, 10, 10]
+    assert all('October 2026' in r['query'] and '2026-10-10' in r['query'] for r in requests)
+    assert all(r['start_date'] == '2026-09-10' and r['end_date'] == '2026-10-11' and 'days' not in r for r in requests)
+    assert len(result['articles']) == 1  # duplicate sources from searches are collapsed
+
+
+def test_dates_missing_malformed_historical_and_shanghai_boundaries(settings):
+    rows = [news_row(date=d, url=f'https://example.com/{i}', title=f'Article {i}') for i, d in enumerate([
+        None, 'bad date', '2026-09-10T15:59:59Z', '2026-09-10T16:00:00Z',
+        'Sat, 10 Oct 2026 15:59:59 GMT', '2026-10-10T16:00:00Z', '2099-01-01T00:00:00Z'])]
+    with httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json={'results': rows}))) as client:
+        provider = AdaptiveTavilyNews(settings, client)
+        start, end = report_window(date(2026, 10, 10))
+        result = provider.fetch('TSLA', start, end)
+    assert {a['title'] for a in result['articles']} == {'Article 3', 'Article 4'}
+    assert all(s['skipped'] == 5 for s in result['searches'])
+    assert timestamp('2026-10-01').tzinfo == timezone.utc
+
+
+def test_resume_search_four_does_not_repeat_first_three(settings):
+    calls, cached = [], {}
+    def fail_on_four(request):
+        calls.append(json.loads(request.content)['query'])
+        return httpx.Response(503 if len(calls) == 4 else 200, json={'results': [news_row()]})
+    start, end = report_window(date(2026, 10, 10))
+    with httpx.Client(transport=httpx.MockTransport(fail_on_four)) as client:
+        with pytest.raises(Exception, match='HTTP 503'):
+            AdaptiveTavilyNews(settings, client).fetch('TSLA', start, end, cached.get, cached.__setitem__)
+    assert set(cached) == {'search_1', 'search_2', 'search_3'}
+    resumed = []
+    def success(request):
+        resumed.append(json.loads(request.content)['query'])
+        return httpx.Response(200, json={'results': [news_row()]})
+    with httpx.Client(transport=httpx.MockTransport(success)) as client:
+        result = AdaptiveTavilyNews(settings, client).fetch('TSLA', start, end, cached.get, cached.__setitem__)
+    assert len(resumed) == 2 and len(result['searches']) == 5
+    assert resumed[0] == calls[3]
+
+
+def test_retry_does_not_reduce_five_logical_searches(settings):
+    settings.retries = 1
+    requests = []
+    def handler(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(429 if len(requests) == 1 else 200, json={'results': [news_row()]})
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        result = AdaptiveTavilyNews(settings, client).fetch('TSLA', *report_window(date(2026, 10, 10)))
+    assert len(requests) == 6 and requests[0] == requests[1]
+    assert len(result['searches']) == 5
+
+
+def test_empty_results_still_do_five_searches(settings):
+    calls = []
+    def handler(request):
+        calls.append(json.loads(request.content))
+        return httpx.Response(200, json={'results': []})
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        result = AdaptiveTavilyNews(settings, client).fetch('TSLA', *report_window(date(2026, 10, 10)))
+    assert len(calls) == 5 and result['articles'] == []
+    assert 'latest news details analysis impact' in calls[3]['query']
+    assert 'recent developments details analysis impact' in calls[4]['query']
+
+
+def test_original_single_bigram_and_single_word_fallback(settings):
+    from equity.models import Article
+    article = Article(id='a', title='AI chip', summary='AI chip adoption adoption adoption',
+                      url='https://example.com/a', published_at=datetime(2026, 10, 1, tzinfo=timezone.utc))
+    provider = AdaptiveTavilyNews(settings)
+    try:
+        assert provider._extract_themes([article], 'Tesla') == ['ai chip', 'adoption']
+        article.title = 'Growth outlook'; article.summary = 'growth growth outlook'
+        assert provider._extract_themes([article], 'Tesla') == ['growth', 'outlook']
+    finally:
+        provider.close()
+
+
+def test_ticker_mapping_avoids_gen_company_mismatch():
+    assert company_name('GEN') == 'Gen Digital Inc.'
+    assert company_name('NVDA.US') == 'NVIDIA Corporation'
+
+
+def test_tavily_quota_exhaustion_is_actionable_and_not_retried(settings):
+    calls = []
     def handler(request):
         calls.append(request)
-        return httpx.Response(status if len(calls)==1 else 200,json=[])
-    result=retry(lambda:request_json(client(handler),'GET','https://example.com'),settings)
-    assert result==[] and len(calls)==2
+        return httpx.Response(432, json={'detail': {'error': 'usage limit'}})
+    settings.retries = 2
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(PermanentAPIError, match='quota/usage limit reached'):
+            AdaptiveTavilyNews(settings, client).fetch('TSLA', *report_window(date(2026, 10, 10)))
+    assert len(calls) == 1
 
 
-def test_timeout_retry(settings):
-    calls=[]
+def test_narrative_unknown_citation_and_unsupported_numbers():
+    articles = [{'id': 'a', 'title': 'Revenue growth', 'summary': 'Revenue rose 12% to $1,200 million.',
+                 'published_at': '2026-10-01T00:00:00Z'}]
+    def report(content, ids):
+        return {'narrative_blocks': [{'title': 'Growth', 'content': content, 'event_ids': ids}]}
+    assert validate_research(report('Revenue rose 12% to 1200 million.', ['a']), articles)
+    with pytest.raises(DataQualityError, match='unknown article'):
+        validate_research(report('Growth improved.', ['invented']), articles)
+    with pytest.raises(DataQualityError, match='numbers absent'):
+        validate_research(report('Revenue rose 99%.', ['a']), articles)
+    with pytest.raises(DataQualityError, match='empty narrative'):
+        validate_research({'narrative_blocks': []}, articles)
+
+
+@pytest.mark.parametrize('finish,content', [('length', '{}'), ('stop', 'not-json')])
+def test_invalid_or_truncated_llm_responses(settings, finish, content):
     def handler(request):
-        calls.append(request)
-        raise httpx.ReadTimeout('test timeout')
-    with pytest.raises(TemporaryAPIError): retry(lambda:request_json(client(handler),'GET','https://example.com'),settings)
-    assert len(calls)==2
+        return httpx.Response(200, json={'choices': [{'finish_reason': finish, 'message': {'content': content}}]})
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(DataQualityError):
+            NarrativeResearch(settings, client).synthesize('TSLA', [], *report_window(date(2026, 10, 10)))
 
 
-def test_permanent_not_retried(settings):
-    calls=[]
+def test_llm_openai_key_fallback_and_strict_schema(settings, monkeypatch):
+    monkeypatch.delenv('LLM_API_KEY'); monkeypatch.setenv('OPENAI_API_KEY', 'standard-key')
+    articles = [{'id': 'a', 'title': 'Launch', 'summary': 'A product launched.', 'published_at': '2026-10-01'}]
     def handler(request):
-        calls.append(request); return httpx.Response(401)
-    with pytest.raises(PermanentAPIError): retry(lambda:request_json(client(handler),'GET','https://example.com'),settings)
-    assert len(calls)==1
-
-
-def eod_row(i=0):
-    return {'date':'2026-10-01T12:00:00+00:00','title':f'Earnings guidance {i}','content':'Source excerpt','link':f'https://example.com/{i}'}
-
-
-def test_eodhd_pagination(settings,monkeypatch):
-    monkeypatch.setenv('EODHD_API_KEY','fake')
-    offsets=[]
-    def handler(request):
-        offsets.append(int(request.url.params['offset']))
-        return httpx.Response(200,json=[eod_row(i) for i in range(1000)] if len(offsets)==1 else [eod_row(1000)])
-    articles,warnings=EODHDNews(settings,client=client(handler)).fetch('TSLA',START,END)
-    assert len(articles)==1001 and offsets==[0,1000] and not warnings
-
-
-def test_fallback_is_incomplete(settings,monkeypatch):
-    monkeypatch.setenv('EODHD_API_KEY','fake'); monkeypatch.setenv('TAVILY_API_KEY','fake')
-    def handler(request):
-        if request.url.host=='eodhd.com': return httpx.Response(429)
-        return httpx.Response(200,json={'results':[{'title':'Product launch','url':'https://example.com/a','content':'Real snippet in mock','published_date':'2026-10-01'}]})
-    articles,warnings=EODHDNews(settings,client=client(handler)).fetch('TSLA',START,END)
-    assert articles[0].provider=='tavily'
-    assert 'Incomplete coverage' in warnings[0]
-
-
-def test_undated_fallback_not_invented(settings,monkeypatch):
-    monkeypatch.delenv('EODHD_API_KEY',raising=False); monkeypatch.setenv('TAVILY_API_KEY','fake')
-    c=client(lambda r:httpx.Response(200,json={'results':[{'title':'News','url':'https://example.com','content':'Snippet'}]}))
-    with pytest.raises(DataQualityError): EODHDNews(settings,client=c).fetch('TSLA',START,END)
-
-
-@pytest.mark.parametrize('raw',[{},'oops',[],[{'title':'Missing fields'}]])
-def test_malformed_news(settings,monkeypatch,raw):
-    monkeypatch.setenv('EODHD_API_KEY','fake'); monkeypatch.delenv('TAVILY_API_KEY',raising=False)
-    with pytest.raises(DataQualityError): EODHDNews(settings,client=client(lambda r:httpx.Response(200,json=raw))).fetch('TSLA',START,END)
-
-
-def test_duplicate_event_merge():
-    articles,_=DemoNews(date(2026,10,10)).fetch('TSLA',START,END)
-    duplicate=articles[0].model_copy(update={'article_id':'other','url':'https://example.com/second'})
-    events=deduplicate(articles+[duplicate])
-    assert len(events)==3
-    assert len(next(e for e in events if e['title']==articles[0].title)['sources'])==2
-
-
-def test_invalid_llm_output_and_missing_citations(settings,tmp_path,monkeypatch):
-    monkeypatch.setenv('LLM_API_KEY','fake')
-    for content in ['{}','not json']:
-        c=client(lambda r:httpx.Response(200,json={'usage':{'prompt_tokens':20,'completion_tokens':20},'choices':[{'finish_reason':'stop','message':{'content':content}}]}))
-        with pytest.raises(DataQualityError): OpenAIResearch(settings,Store(tmp_path/'db'),'TSLA','2026-10-10','v1',c).synthesize('TSLA',[],None)
-    events=rank(deduplicate(DemoNews(date(2026,10,10)).fetch('TSLA',START,END)[0]),8)
-    research=DemoResearch().synthesize('TSLA',events,None)
-    research.executive_summary[0].event_ids=['invented']
-    with pytest.raises(DataQualityError): validate_research(research,events)
-    research=DemoResearch().synthesize('TSLA',events,None)
-    research.executive_summary[0].text='Revenue grew 998877%'
-    with pytest.raises(DataQualityError): validate_research(research,events)
-
-
-def test_budget_persistent_across_retry(settings,tmp_path,monkeypatch):
-    monkeypatch.setenv('LLM_API_KEY','fake'); settings.max_tokens=1
-    calls=[]
-    with pytest.raises(BudgetError):
-        OpenAIResearch(settings,Store(tmp_path/'db'),'TSLA','2026-10-10','v1',client(lambda r:calls.append(r))).synthesize('TSLA',[],None)
-    assert calls==[]
-
-
-def test_missing_credentials_no_secret_echo(settings,monkeypatch):
-    monkeypatch.delenv('EODHD_API_KEY',raising=False); monkeypatch.delenv('TAVILY_API_KEY',raising=False)
-    with pytest.raises(PermanentAPIError,match='Missing EODHD_API_KEY'):
-        EODHDNews(settings).fetch('TSLA',START,END)
-
-
-def test_retry_preserves_spend_on_timeout(settings,tmp_path,monkeypatch):
-    monkeypatch.setenv('LLM_API_KEY','fake')
-    store=Store(tmp_path/'db')
-    def handler(request): raise httpx.ReadTimeout('request may have been billed')
-    with pytest.raises(TemporaryAPIError):
-        OpenAIResearch(settings,store,'TSLA','2026-10-10','v1',client(handler)).synthesize('TSLA',[],None)
-    with store.connect() as c:
-        assert c.execute('SELECT COUNT(*) FROM api_ledger').fetchone()[0]==2
-    assert store.usage('2026-10-10','v1')['cost_usd']>0
-
-
-def test_budget_atomic_under_concurrency(settings,tmp_path):
-    from concurrent.futures import ThreadPoolExecutor
-    store=Store(tmp_path/'db'); settings.max_cost_usd=1
-    def reserve(i):
-        try: store.reserve('2026-10-10','v1',str(i),'test',10,.6,settings); return True
-        except BudgetError: return False
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        assert sum(pool.map(reserve,range(4)))==1
-    assert store.usage('2026-10-10','v1')['cost_usd']==.6
-
-
-def test_syndicated_body_deduplicated_even_with_different_headlines():
-    articles,_=DemoNews(date(2026,10,10)).fetch('TSLA',START,END)
-    article=articles[0].model_copy(update={'summary':'Identical syndicated source text about an earnings announcement and its outlook. '*4})
-    duplicate=article.model_copy(update={'title':'Different syndicated headline','article_id':'syndicated','url':'https://example.com/syndicated'})
-    assert len(deduplicate([article,duplicate]))==1
+        assert request.headers['Authorization'] == 'Bearer standard-key'
+        body = json.loads(request.content)
+        schema = body['response_format']['json_schema']['schema']
+        assert schema['additionalProperties'] is False
+        assert schema['$defs']['NarrativeBlock']['additionalProperties'] is False
+        output = {'narrative_blocks': [{'title': 'Product', 'content': 'A product launched.', 'event_ids': ['a']}]}
+        return httpx.Response(200, json={'choices': [{'finish_reason': 'stop', 'message': {'content': json.dumps(output)}}]})
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        assert NarrativeResearch(settings, client).synthesize('TSLA', articles, *report_window(date(2026, 10, 10)))
