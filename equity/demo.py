@@ -1,16 +1,29 @@
-from datetime import datetime, timedelta, timezone
-from .models import Article
+"""Offline fixtures exercise the same five-search and narrative/PDF path."""
+import hashlib
+from datetime import timedelta
+from .adaptive_providers import AdaptiveTavilyNews
+from .models import Article, DeepResearch, NarrativeBlock
 
 
-class DemoNews:
-    def __init__(self, report_date):
-        self.report_date = report_date
+class DemoNews(AdaptiveTavilyNews):
+    def search(self, query, start, end, max_results, stop=None):
+        key = hashlib.sha256(query.encode()).hexdigest()[:12]
+        article = Article(id=key, title='Synthetic AI chip and product launch update',
+            summary='Synthetic company update: an AI chip product launch and partnership are announced. '
+                    'The company is expanding its offering while customer adoption remains uncertain.',
+            url=f'https://example.com/demo/{key}', published_at=end - timedelta(days=2))
+        # Distinct titles let the demo exercise multiple thematic sections.
+        article.title += ' ' + key.upper()
+        return {'query': query, 'articles': [article.model_dump(mode='json')], 'skipped': 0}
 
-    def fetch(self, ticker, start, end):
-        articles = []
-        for i, subject in enumerate(['earnings guidance review','regulatory review','product launch']):
-            published = datetime.combine(self.report_date-timedelta(days=7*(i+1)),datetime.min.time(),tzinfo=timezone.utc)
-            articles.append(Article(provider='synthetic-demo',article_id=f'{ticker}-{i}',ticker=ticker,
-                            title=f'SYNTHETIC {ticker} {subject}',summary=f'Fabricated test fixture for {subject}; no actual company event or financial claim.',
-                            url=f'https://example.com/synthetic/{ticker}/{i}',published_at=published,retrieved_at=datetime.now(timezone.utc)))
-        return articles, ['SYNTHETIC DEMO: fabricated test fixtures, not real company news']
+
+class DemoResearch:
+    def synthesize(self, ticker, articles, start, end, stop=None):
+        return DeepResearch(narrative_blocks=[NarrativeBlock(title='Product strategy and customer adoption',
+            content='The synthetic company update describes an AI chip product launch and a partnership. '
+                    'These announcements indicate an expansion of the product offering. Customer adoption '
+                    'remains uncertain in the supplied evidence, so the commercial impact cannot yet be established.',
+            event_ids=[articles[0]['id']])])
+
+    def close(self):
+        pass
