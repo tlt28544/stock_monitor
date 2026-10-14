@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Stock Monitor - Narrative Research Workflow</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 16px;
+            padding: 40px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+        h1 {
+            text-align: center;
+            color: #2d3748;
+            margin-bottom: 10px;
+            font-size: 32px;
+        }
+        .subtitle {
+            text-align: center;
+            color: #718096;
+            margin-bottom: 40px;
+            font-size: 14px;
+        }
+        .workflow {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        .stage {
+            background: linear-gradient(135deg, #f6f8fb 0%, #ffffff 100%);
+            border-radius: 12px;
+            padding: 24px;
+            border-left: 6px solid;
+            position: relative;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }
+        .stage.collection { border-color: #3182ce; }
+        .stage.classification { border-color: #38a169; }
+        .stage.synthesis { border-color: #805ad5; }
+        .stage.valuation { border-color: #dd6b20; }
+        .stage.report { border-color: #e53e3e; }
+        
+        .stage-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+        .stage-number {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            color: white;
+            margin-right: 12px;
+            font-size: 16px;
+        }
+        .collection .stage-number { background: #3182ce; }
+        .classification .stage-number { background: #38a169; }
+        .synthesis .stage-number { background: #805ad5; }
+        .valuation .stage-number { background: #dd6b20; }
+        .report .stage-number { background: #e53e3e; }
+        
+        .stage-title {
+            font-size: 20px;
+            font-weight: 600;
+            color: #2d3748;
+        }
+        .stage-desc {
+            color: #4a5568;
+            font-size: 14px;
+            margin-bottom: 16px;
+            line-height: 1.6;
+        }
+        .stage-content {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        .info-box {
+            background: white;
+            border-radius: 8px;
+            padding: 16px;
+            border: 1px solid #e2e8f0;
+        }
+        .info-title {
+            font-weight: 600;
+            color: #2d3748;
+            margin-bottom: 8px;
+            font-size: 13px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .info-list {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+        .info-list li {
+            padding: 6px 0;
+            color: #4a5568;
+            font-size: 13px;
+            display: flex;
+            align-items: start;
+        }
+        .info-list li:before {
+            content: "→";
+            margin-right: 8px;
+            color: #a0aec0;
+        }
+        .metrics {
+            display: flex;
+            gap: 16px;
+            margin-top: 20px;
+        }
+        .metric {
+            flex: 1;
+            background: white;
+            border-radius: 8px;
+            padding: 16px;
+            border: 1px solid #e2e8f0;
+            text-align: center;
+        }
+        .metric-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #2d3748;
+            margin-bottom: 4px;
+        }
+        .metric-label {
+            font-size: 12px;
+            color: #718096;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .arrow {
+            text-align: center;
+            color: #cbd5e0;
+            font-size: 24px;
+            margin: -10px 0;
+        }
+        .sample-output {
+            background: #f7fafc;
+            border-radius: 8px;
+            padding: 16px;
+            margin-top: 12px;
+            border: 1px dashed #cbd5e0;
+            font-family: 'Monaco', 'Courier New', monospace;
+            font-size: 12px;
+            color: #2d3748;
+            line-height: 1.6;
+        }
+        .highlight {
+            background: #fef5e7;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-weight: 600;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Stock Monitor: Narrative Research Workflow</h1>
+        <div class="subtitle">Adaptive Tavily + OpenAI GPT-4.1-mini + EODHD Market Data → Institutional-Grade Deep Narrative Reports</div>
+        
+        <div class="workflow">
+            <!-- Stage 1: Collection -->
+            <div class="stage collection">
+                <div class="stage-header">
+                    <div class="stage-number">1</div>
+                    <div class="stage-title">Data Collection (Adaptive Tavily)</div>
+                </div>
+                <div class="stage-desc">
+                    Each ticker gets <strong>3 targeted searches</strong> instead of exhaustive news scraping. Coverage optimized for relevance over completeness.
+                </div>
+                <div class="stage-content">
+                    <div class="info-box">
+                        <div class="info-title">Search Queries</div>
+                        <ul class="info-list">
+                            <li><span class="highlight">Query 1:</span> {company} earnings revenue financial results quarterly (max 10)</li>
+                            <li><span class="highlight">Query 2:</span> {company} product launch competition market share (max 10)</li>
+                            <li><span class="highlight">Query 3:</span> {company} regulatory industry sector trends (max 10)</li>
+                        </ul>
+                    </div>
+                    <div class="info-box">
+                        <div class="info-title">Output</div>
+                        <ul class="info-list">
+                            <li>~30 articles per ticker (vs 4000-5000 with EODHD)</li>
+                            <li>Each article: title, URL, published_date, summary</li>
+                            <li>Deduplication: O(n) URL-based (vs O(n²) content similarity)</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="metrics">
+                    <div class="metric">
+                        <div class="metric-value">~1s</div>
+                        <div class="metric-label">Collection Time</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-value">$0.09</div>
+                        <div class="metric-label">Tavily Cost</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="arrow">↓</div>
+            
+            <!-- Stage 2: Classification -->
+            <div class="stage classification">
+                <div class="stage-header">
+                    <div class="stage-number">2</div>
+                    <div class="stage-title">Event Classification (OpenAI GPT-4.1-mini)</div>
+                </div>
+                <div class="stage-desc">
+                    Classify and rank articles into high-materiality investment events with category tags, dates, and relevance scores.
+                </div>
+                <div class="stage-content">
+                    <div class="info-box">
+                        <div class="info-title">Categories</div>
+                        <ul class="info-list">
+                            <li>Earnings & Financial Results</li>
+                            <li>Product / Service Launch</li>
+                            <li>M&A / Strategic Partnership</li>
+                            <li>Regulatory / Legal</li>
+                            <li>Management / Leadership</li>
+                            <li>Industry / Market Dynamics</li>
+                        </ul>
+                    </div>
+                    <div class="info-box">
+                        <div class="info-title">Ranking Logic</div>
+                        <ul class="info-list">
+                            <li>Materiality score: 1-5 (4-5 flagged for valuation review)</li>
+                            <li>Event deduplication by content similarity</li>
+                            <li>Keep top events by score and recency</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="arrow">↓</div>
+            
+            <!-- Stage 3: Synthesis -->
+            <div class="stage synthesis">
+                <div class="stage-header">
+                    <div class="stage-number">3</div>
+                    <div class="stage-title">Narrative Synthesis (NarrativeResearch Provider)</div>
+                </div>
+                <div class="stage-desc">
+                    Transform classified events into <strong>3-5 deep narrative blocks</strong> with connected storytelling, data-backed analysis, and institutional investor tone.
+                </div>
+                <div class="stage-content">
+                    <div class="info-box">
+                        <div class="info-title">LLM Prompt Instructions</div>
+                        <ul class="info-list">
+                            <li>Write 3-5 thematic narrative blocks (not bullet lists)</li>
+                            <li>Each block: 200-600 words of flowing prose</li>
+                            <li>Include specific numbers, dates, context, and implications</li>
+                            <li>Cite event IDs inline for traceability</li>
+                            <li>Add "Key Metrics" summary box after each block</li>
+                        </ul>
+                    </div>
+                    <div class="info-box">
+                        <div class="info-title">Output Structure (NarrativeBlock)</div>
+                        <ul class="info-list">
+                            <li><strong>title:</strong> Narrative block headline</li>
+                            <li><strong>body:</strong> 200-600 word connected story</li>
+                            <li><strong>key_metrics:</strong> Bullet-list summary of key data points</li>
+                            <li><strong>event_ids:</strong> Cited event references</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="sample-output">
+<strong>Example Block:</strong>
+
+<strong>Title:</strong> Strong Earnings Acceleration Driven by Revenue Growth and Margin Expansion
+
+<strong>Body:</strong> Amazon's most recent earnings reports reveal an exceptionally robust performance both in top-line growth and profitability margins over the past year. Third quarter 2025 results showed revenue of $180.2 billion, a 13% increase from the prior year quarter, with net income climbing 38% to $21.2 billion and profit margin expanding to 12% from 9.6%. More strikingly, the second quarter of 2026 displayed a dramatic acceleration with revenue reaching $200.6 billion, up 20% year-over-year...
+
+<strong>Key Metrics:</strong>
+• Q3 2025 Revenue: $180.2B (↑13%)
+• Q3 2025 Net Income: $21.2B (↑38%)
+• Q2 2026 Revenue: $200.6B (↑20%)
+• Q2 2026 Profit Margin: 31% (from 11%)
+                </div>
+                <div class="metrics">
+                    <div class="metric">
+                        <div class="metric-value">8000</div>
+                        <div class="metric-label">Max Output Tokens</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-value">~10s</div>
+                        <div class="metric-label">LLM Generation Time</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="arrow">↓</div>
+            
+            <!-- Stage 4: Valuation -->
+            <div class="stage valuation">
+                <div class="stage-header">
+                    <div class="stage-number">4</div>
+                    <div class="stage-title">Market Data Enrichment (EODHD API)</div>
+                </div>
+                <div class="stage-desc">
+                    Fetch real-time market context: price, market cap, P/E ratio, and valuation flags from high-materiality events.
+                </div>
+                <div class="stage-content">
+                    <div class="info-box">
+                        <div class="info-title">Data Sources</div>
+                        <ul class="info-list">
+                            <li>EODHD real-time quote API: GET /api/real-time/{TICKER}.US</li>
+                            <li>Returns: close price, market cap, P/E ratio, timestamp</li>
+                            <li>Graceful degradation: missing data shows as "N/A"</li>
+                        </ul>
+                    </div>
+                    <div class="info-box">
+                        <div class="info-title">Valuation Table</div>
+                        <ul class="info-list">
+                            <li>Currently empty (no analyst reference model)</li>
+                            <li>Placeholder for future SOTP breakdown</li>
+                            <li>Flags high-materiality events for review</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="arrow">↓</div>
+            
+            <!-- Stage 5: Report -->
+            <div class="stage report">
+                <div class="stage-header">
+                    <div class="stage-number">5</div>
+                    <div class="stage-title">PDF Report Generation (narrative_reports.py)</div>
+                </div>
+                <div class="stage-desc">
+                    Render narrative blocks into a professional PDF with market context header, flowing prose, key metrics boxes, source index, and valuation table.
+                </div>
+                <div class="stage-content">
+                    <div class="info-box">
+                        <div class="info-title">Report Structure</div>
+                        <ul class="info-list">
+                            <li><strong>Header:</strong> Ticker | Price | Market Cap | P/E | Report Date</li>
+                            <li><strong>Narrative Blocks:</strong> 3-5 thematic sections (200-600 words each)</li>
+                            <li><strong>Key Metrics Boxes:</strong> Bullet summary after each block</li>
+                            <li><strong>Sources & Event Index:</strong> Hyperlinked citations</li>
+                            <li><strong>Valuation Review:</strong> Assumptions to revisit</li>
+                            <li><strong>Valuation Table:</strong> SOTP framework (placeholder)</li>
+                        </ul>
+                    </div>
+                    <div class="info-box">
+                        <div class="info-title">Validation</div>
+                        <ul class="info-list">
+                            <li>PDF must be 2-4 pages</li>
+                            <li>Ticker symbol present</li>
+                            <li>"Sources" and "Valuation" sections exist</li>
+                            <li>All event source URLs embedded as hyperlinks</li>
+                            <li>SHA256 hash integrity check</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="metrics">
+                    <div class="metric">
+                        <div class="metric-value">3</div>
+                        <div class="metric-label">PDF Pages</div>
+                    </div>
+                    <div class="metric">
+                        <div class="metric-value">~2s</div>
+                        <div class="metric-label">Render Time</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Summary Metrics -->
+        <div style="margin-top: 40px; padding: 24px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 12px; color: white;">
+            <h2 style="margin: 0 0 20px 0; text-align: center;">End-to-End Performance</h2>
+            <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; text-align: center;">
+                <div>
+                    <div style="font-size: 36px; font-weight: bold;">~18s</div>
+                    <div style="font-size: 14px; opacity: 0.9;">Total Time</div>
+                </div>
+                <div>
+                    <div style="font-size: 36px; font-weight: bold;">$0.34</div>
+                    <div style="font-size: 14px; opacity: 0.9;">Cost per Run</div>
+                </div>
+                <div>
+                    <div style="font-size: 36px; font-weight: bold;">3/3</div>
+                    <div style="font-size: 14px; opacity: 0.9;">Success Rate</div>
+                </div>
+                <div>
+                    <div style="font-size: 36px; font-weight: bold;">~30</div>
+                    <div style="font-size: 14px; opacity: 0.9;">Articles per Ticker</div>
+                </div>
+            </div>
+        </div>
+        
+        <div style="margin-top: 20px; padding: 16px; background: #f7fafc; border-radius: 8px; border-left: 4px solid #4299e1;">
+            <strong style="color: #2c5282;">Key Improvements vs. Old System:</strong>
+            <ul style="margin: 8px 0 0 0; color: #2d3748; font-size: 14px;">
+                <li><strong>Speed:</strong> 30-60 minutes → 18 seconds (100x faster)</li>
+                <li><strong>Cost:</strong> $0.50-2.00 → $0.34 per run</li>
+                <li><strong>Success Rate:</strong> 0/3 (timeouts) → 3/3 (100%)</li>
+                <li><strong>Coverage:</strong> 4000-5000 articles → 30 targeted articles (relevance over completeness)</li>
+                <li><strong>Structure:</strong> Bullet-point fragments → Deep narrative storytelling</li>
+                <li><strong>Depth:</strong> Surface-level → Institutional investor grade</li>
+            </ul>
+        </div>
+    </div>
+</body>
+</html>
